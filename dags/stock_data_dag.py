@@ -1,54 +1,112 @@
+"""
+### US Stock Market Data Collection DAG
+수집 대상: S&P 500 주요 기업들의 일별 주가 데이터
+수집 주기: 매일 장 마감 후 (미국 주중)
+"""
+
 from datetime import datetime, timedelta
-from airflow import DAG
-from airflow.operators.python import PythonOperator
+from typing import Dict, Any
+
+from airflow.decorators import dag, task
+from airflow.models import Variable
+from airflow.utils.dates import days_ago
 import yfinance as yf
 import pandas as pd
 
-# 기본 DAG 설정
-default_args = {
-    'owner': 'airflow',
-    'depends_on_past': False,
-    'email': ['owner@junnyland.com'],
-    'email_on_failure': False,
-    'email_on_retry': False,
-    'retries': 1,
-    'retry_delay': timedelta(minutes=5),
+
+# DAG의 기본 설정값
+default_args: Dict[str, Any] = {
+    "owner": "airflow",  # DAG 소유자
+    "retries": 3,  # 실패시 재시도 횟수
+    "retry_delay": timedelta(minutes=5),  # 재시도 간격
+    "depends_on_past": False,  # 이전 DAG 실행 결과에 의존하지 않음
 }
 
-# DAG 정의
-with DAG(
-        'stock_data_collection',
-        default_args=default_args,
-        description='Collect stock data using yfinance',
-        schedule_interval='0 6 * * *',  # 매일 오전 6시에 실행
-        start_date=datetime(2025, 1, 1),
-        catchup=False,
-) as dag:
+# 수집할 주식 심볼 리스트
+STOCK_SYMBOLS = [
+    "AAPL",  # Apple
+    "MSFT",  # Microsoft
+    "GOOGL", # Google
+    "AMZN",  # Amazon
+    "META",  # Meta
+]
 
-    # Python 함수 정의
-    def fetch_stock_data(**kwargs):
-        ticker = kwargs.get('ticker', 'AAPL')  # 기본 티커는 AAPL
-        output_file = kwargs.get('output_file', f'/tmp/{ticker}_data.csv')
+@dag(
+    dag_id="us_stock_daily_data",  # DAG 이름
+    schedule_interval="0 2 * * 2-6",  # 미국 장 마감 후 (UTC 기준 다음날 02:00)
+    start_date=days_ago(1),  # 시작일
+    catchup=False,  # 과거 데이터 백필 하지 않음
+    default_args=default_args,
+    tags=["stock", "finance", "US"],  # DAG 태그
+)
+def collect_stock_data():
+    """미국 주요 기업들의 주가 데이터를 수집하는 DAG"""
 
-        # 주식 데이터 다운로드
-        data = yf.download(ticker, period='1d', interval='1m')
+    @task()
+    def fetch_daily_stock_data(symbols: list = STOCK_SYMBOLS, **context) -> str:
+        """
+        yfinance를 사용하여 주식 데이터를 수집하는 task
+        
+        Args:
+            symbols: 수집할 주식 심볼 리스트
+            
+        Returns:
+            저장된 파일 경로
+        """
+        execution_date = context["logical_date"]
+        all_stock_data = []
 
-        if not data.empty:
-            # 데이터 저장
-            data.to_csv(output_file)
-            print(f"Stock data saved to {output_file}")
-        else:
-            print(f"No data fetched for {ticker}")
+        for symbol in symbols:
+            try:
+                # 주식 데이터 수집
+                stock = yf.Ticker(symbol)
+                df = stock.history(
+                    start=execution_date,
+                    end=execution_date + timedelta(days=1),
+                    interval="1d"
+                )
 
-    # PythonOperator 생성
-    fetch_data_task = PythonOperator(
-        task_id='fetch_stock_data',
-        python_callable=fetch_stock_data,
-        op_kwargs={
-            'ticker': 'AAPL',  # 원하는 주식 심볼
-            'output_file': '/tmp/AAPL_stock_data.csv',  # CSV 저장 경로
-        },
-    )
+                if not df.empty:
+                    df["symbol"] = symbol
+                    df = df.reset_index()
+                    all_stock_data.append(df)
 
-    # Task 연결
-    fetch_data_task
+            except Exception as e:
+                print(f"Error fetching {symbol}: {str(e)}")
+                continue
+
+        if not all_stock_data:
+            raise ValueError("No stock data collected")
+
+        # 모든 데이터 합치기
+        result_df = pd.concat(all_stock_data, ignore_index=True)
+
+        # 파일로 저장
+        date_str = execution_date.strftime("%Y-%m-%d")
+        output_path = f"/opt/airflow/data/stocks_{date_str}.csv"
+        result_df.to_csv(output_path, index=False)
+
+        return output_path
+
+    @task()
+    def process_stock_data(file_path: str) -> None:
+        """
+        수집된 주식 데이터를 처리하는 task
+        
+        Args:
+            file_path: 처리할 파일 경로
+        """
+        df = pd.read_csv(file_path)
+
+        # 여기에 데이터 처리 로직 추가
+        # 예: 이동평균 계산, 기술적 지표 계산 등
+
+        processed_path = file_path.replace(".csv", "_processed.csv")
+        df.to_csv(processed_path, index=False)
+
+    # Task 의존성 설정
+    stock_file = fetch_daily_stock_data()
+    process_stock_data(stock_file)
+
+# DAG 인스턴스 생성
+dag_instance = collect_stock_data()
