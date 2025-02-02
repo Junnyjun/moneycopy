@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from usaStock import fetch_us_stock_data, process_stock_data, register_stock_data
+from src.main.usa.usaStock import fetch_us_stock_data, process_stock_data, register_stock_data
 
 default_args = {
     "owner": "airflow",
