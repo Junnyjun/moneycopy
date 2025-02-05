@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "datastore"
+version = "0.1.0"
+description = ""
+authors = ["Junnyjun <chbe5082@naver.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+apache-airflow = "^2.8.1"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.1.2"
+pytest-mock = "^3.10.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
