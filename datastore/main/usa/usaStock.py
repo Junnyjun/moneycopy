@@ -1,4 +1,5 @@
 # usaStock.py
+
 import requests
 
 def fetch_us_stock_data(symbol: str) -> dict:

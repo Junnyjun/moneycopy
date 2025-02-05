@@ -1,6 +1,6 @@
 import unittest
 from airflow.models import DagBag
-from usaStockDag import dag
+from main.usa.usaStockDag import dag
 
 class TestUSAStockDAGIntegration(unittest.TestCase):
 
