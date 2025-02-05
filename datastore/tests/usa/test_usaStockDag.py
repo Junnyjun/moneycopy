@@ -1,4 +1,10 @@
 import unittest
+
+import os
+
+# 테스트 환경에서는 DAG 직렬화 기능을 비활성화하여 DB 접근을 피합니다.
+os.environ["AIRFLOW__CORE__STORE_SERIALIZED_DAGS"] = "False"
+
 from airflow.models import DagBag
 from main.usa.usaStockDag import dag
 
