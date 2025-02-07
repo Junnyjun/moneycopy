@@ -1,109 +1,79 @@
-version: '3.7'
-
+# Configuration environment variables:
+# - DATAFLOW_VERSION and SKIPPER_VERSION specify what DataFlow and Skipper image versions to use.
+# - STREAM_APPS_URI and TASK_APPS_URI are used to specify what Stream and Task applications to pre-register.
+# - HOST_MOUNT_PATH and DOCKER_MOUNT_PATH are used to set the host and docker mount folders.
+#   If not set HOST_MOUNT_PATH defaults to the local host folder where the docker compose is being started.
+#   If not set DOCKER_MOUNT_PATH defaults to /home/cnb/scdf on dataflow-server and skipper containers.
+#   Example to mount the local Maven repository: HOST_MOUNT_PATH=~/.m2 DOCKER_MOUNT_PATH=/home/cnb/.m2  docker-compose up
+# - APPS_PORT_RANGE allows you to override the port range exported by the Skipper server. By default the APPS_PORT_RANGE
+#   must supersede the local deployer's PORTRANGE_LOW and PORTRANGE_HIGH - the ports assigned to the stream apps run inside the Skipper container.
+#   The stream apps tha run in their own docker containers must set [DOCKER_PORTRANGE_LOW, DOCKER_PORTRANGE_HIGH] range that
+#   doesn't overlap with the APPS_PORT_RANGE.
+#
+# Exposed container ports:
+# - 9393:9393               - Data Flow server port (http://localhost:9393/dashboard)
+# - 7577:7577               - Skipper server port (http://localhost:7577/api)
+# - 20000-20105:20000-20105 - Port range for all deployed stream applications that run inside the Skipper container (e.g. maven:// registered apps).
+#                             That means you can reach the application's actuator endpoints from your host machine.
+#                             The deployed stream applications that run in their own docker containers (e.g. docker:// registered apps),
+#                             can be reached on the ports they expose.
 services:
-  # PostgreSQL (ARM64 지원)
-  postgres:
-    image: postgres:15-alpine
-    container_name: airflow_postgres
-    environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+  dataflow-server:
+    user: root
+    image: springcloud/spring-cloud-dataflow-server:${DATAFLOW_VERSION:-2.11.3-SNAPSHOT}${BP_JVM_VERSION:-}
+    container_name: dataflow-server
     ports:
-      - "5432:5432"
+      - "9393:9393"
+    environment:
+      - LANG=en_US.utf8
+      - LC_ALL=en_US.utf8
+      - JDK_JAVA_OPTIONS=-Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8
+      # Set CLOSECONTEXTENABLED=true to ensure that the CRT launcher is closed.
+      - SPRING_CLOUD_DATAFLOW_APPLICATIONPROPERTIES_TASK_SPRING_CLOUD_TASK_CLOSECONTEXTENABLED=true
+      - SPRING_CLOUD_SKIPPER_CLIENT_SERVER_URI=${SKIPPER_URI:-http://skipper-server:7577}/api
+      # (Optionally) authenticate the default Docker Hub access for the App Metadata access.
+      - SPRING_CLOUD_DATAFLOW_CONTAINER_REGISTRY_CONFIGURATIONS_DEFAULT_USER=${METADATA_DEFAULT_DOCKERHUB_USER}
+      - SPRING_CLOUD_DATAFLOW_CONTAINER_REGISTRY_CONFIGURATIONS_DEFAULT_SECRET=${METADATA_DEFAULT_DOCKERHUB_PASSWORD}
+      - SPRING_CLOUD_DATAFLOW_CONTAINER_REGISTRYCONFIGURATIONS_DEFAULT_USER=${METADATA_DEFAULT_DOCKERHUB_USER}
+      - SPRING_CLOUD_DATAFLOW_CONTAINER_REGISTRYCONFIGURATIONS_DEFAULT_SECRET=${METADATA_DEFAULT_DOCKERHUB_PASSWORD}
+    depends_on:
+      - skipper-server
     restart: always
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U airflow"]
-      interval: 5s
-      retries: 5
-      start_period: 10s
+      - ${HOST_MOUNT_PATH:-.}:${DOCKER_MOUNT_PATH:-/home/cnb/scdf}
 
-  # Redis (ARM64 지원)
-  redis:
-    image: redis:latest
-    container_name: airflow_redis
+  app-import-stream:
+    image: springcloud/baseimage:1.0.4
+    container_name: dataflow-app-import-stream
+    depends_on:
+      - dataflow-server
+
+  app-import-task:
+    image: springcloud/baseimage:1.0.4
+    container_name: dataflow-app-import-task
+    depends_on:
+      - dataflow-server
+    command: >
+      /bin/sh -c "
+        ./wait-for-it.sh -t 360 dataflow-server:9393;
+        wget -qO- '${DATAFLOW_URI:-http://dataflow-server:9393}/apps' --no-check-certificate --post-data='uri=${TASK_APPS_URI:-https://dataflow.spring.io/task-maven-3-0-x&force=true}';
+        echo 'Maven Task apps imported'"
+
+  skipper-server:
+    user: root
+    image: springcloud/spring-cloud-skipper-server:${SKIPPER_VERSION:-2.11.3-SNAPSHOT}${BP_JVM_VERSION:-}
+    container_name: skipper-server
     ports:
-      - "6379:6379"
-    restart: always
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      retries: 5
-      start_period: 10s
-
-  # Airflow Webserver (ARM64 지원)
-  airflow-webserver:
-    image: airflow-arm64
-    container_name: airflow_webserver
+      - "7577:7577"
+      - ${APPS_PORT_RANGE:-20000-20195:20000-20195}
     environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__WEBSERVER__RBAC: "True"
-    ports:
-      - "8080:8080"
+      - LANG=en_US.utf8
+      - LC_ALL=en_US.utf8
+      - JDK_JAVA_OPTIONS=-Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8
+      - SERVER_PORT=7577
+      - SPRING_CLOUD_SKIPPER_SERVER_PLATFORM_LOCAL_ACCOUNTS_DEFAULT_PORTRANGE_LOW=20000
+      - SPRING_CLOUD_SKIPPER_SERVER_PLATFORM_LOCAL_ACCOUNTS_DEFAULT_PORTRANGE_HIGH=20190
+      - LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_CLOUD_SKIPPER_SERVER_DEPLOYER=ERROR
     restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    entrypoint: ["/opt/airflow/airflow-entrypoint.sh"]
-    command: webserver
     volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-      - ./airflow-entrypoint.sh:/opt/airflow/airflow-entrypoint.sh  # <- 스크립트 추가
-
-
-  # Airflow Scheduler (ARM64 지원)
-  airflow-scheduler:
-    image: airflow-arm64
-    container_name: airflow_scheduler
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: scheduler
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-
-  # Airflow Worker (ARM64 지원)
-  airflow-worker:
-    image: airflow-arm64
-    container_name: airflow_worker
-    environment:
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres:5432/airflow
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: celery worker
-    volumes:
-      - ./dags:/opt/airflow/dags
-      - ./logs:/opt/airflow/logs
-      - ./plugins:/opt/airflow/plugins
-
-volumes:
-  postgres_data:
-  redis_data:
+      - ${HOST_MOUNT_PATH:-.}:${DOCKER_MOUNT_PATH:-/home/cnb/scdf}
